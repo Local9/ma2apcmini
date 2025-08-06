@@ -154,30 +154,9 @@ let client = new W3CWebSocket(`ws://${WS_URL}:80/`);
 // Connection management functions
 function initializeConnection() {
   log(LOG_LEVELS.INFO, "🔌 Initializing connection to GrandMA2...");
-
-  client.onopen = function () {
-    log(LOG_LEVELS.INFO, "✅ WebSocket connection established");
-    // Don't set isConnected to true yet - wait for successful login
-    connectionState.isReconnecting = false;
-    connectionState.reconnectAttempts = 0;
-    connectionState.reconnectDelay = 1000;
-  };
-
-  client.onclose = function (event) {
-    log(LOG_LEVELS.WARN, "🔌 WebSocket connection closed", { code: event.code, reason: event.reason });
-    connectionState.isConnected = false;
-
-    if (!connectionState.isReconnecting && connectionState.reconnectAttempts < connectionState.maxReconnectAttempts) {
-      scheduleReconnection();
-    } else if (connectionState.reconnectAttempts >= connectionState.maxReconnectAttempts) {
-      log(LOG_LEVELS.ERROR, "🛑 Max reconnection attempts reached. Manual intervention required.");
-    }
-  };
-
-  client.onerror = function (error) {
-    log(LOG_LEVELS.ERROR, "💥 WebSocket error occurred", error);
-    connectionState.isConnected = false;
-  };
+  
+  // Set up WebSocket event handlers
+  setupWebSocketHandlers(client);
 }
 
 function scheduleReconnection() {
@@ -189,11 +168,20 @@ function scheduleReconnection() {
 
   log(LOG_LEVELS.WARN, `🔄 Scheduling reconnection attempt ${connectionState.reconnectAttempts}/${connectionState.maxReconnectAttempts} in ${delay}ms`);
 
-  setTimeout(() => {
+  setTimeout(async () => {
     if (!connectionState.isConnected) {
       log(LOG_LEVELS.INFO, "🔄 Attempting to reconnect...");
+      
+      // Step 1: Reconnect MIDI devices first
+      log(LOG_LEVELS.INFO, "🎹 Reconnecting MIDI devices...");
+      await initializeMidiDevices();
+      setupMidiEventListeners();
+      
+      // Step 2: Then reconnect WebSocket
+      log(LOG_LEVELS.INFO, "🌐 Reconnecting WebSocket...");
       client = new W3CWebSocket(`ws://${WS_URL}:80/`);
       initializeConnection();
+      
       // Reset connection state for new connection
       connectionState.isConnected = false;
     }
@@ -1333,160 +1321,160 @@ async function initializeSystem() {
 // Start the system initialization
 initializeSystem();
 
-log(LOG_LEVELS.INFO, "🔌 Connecting to grandMA2 ...");
+// Function to set up WebSocket event handlers
+function setupWebSocketHandlers(client) {
+  client.onerror = function () {
+    log(LOG_LEVELS.ERROR, "💥 Connection Error");
+  };
 
-// WEBSOCKET handlers
-client.onerror = function () {
-  log(LOG_LEVELS.ERROR, "💥 Connection Error");
-};
+  client.onopen = function () {
+    log(LOG_LEVELS.INFO, "✅ WebSocket Client Connected");
+  };
 
-client.onopen = function () {
-  log(LOG_LEVELS.INFO, "✅ WebSocket Client Connected");
-};
+  client.onclose = function () {
+    log(LOG_LEVELS.WARN, "🔌 Client Closed");
+    for (let i = 0; i < TOTAL_LEDS; i++) {
+      output.send("noteon", { note: i, velocity: 0, channel: 0 });
+    }
+    input.close();
+    output.close();
+    process.exit();
+  };
 
-client.onclose = function () {
-  log(LOG_LEVELS.WARN, "🔌 Client Closed");
-  for (let i = 0; i < TOTAL_LEDS; i++) {
-    output.send("noteon", { note: i, velocity: 0, channel: 0 });
-  }
-  input.close();
-  output.close();
-  process.exit();
-};
-
-// Optimized message handler with error handling
-client.onmessage = function (e) {
-  // Allow login messages even when not fully connected
-  if (typeof e.data === "string") {
-    try {
-      if (!validateResponse(e.data)) {
-        log(LOG_LEVELS.WARN, "⚠️ Invalid response received, skipping processing");
-        return;
-      }
-
-      const obj = JSON.parse(e.data);
-
-      // Handle login and connection establishment first
-      if (obj.status === "server ready") {
-        log(LOG_LEVELS.INFO, "🟢 SERVER READY");
-        client.send(JSON.stringify({ session: 0 }));
-        return;
-      }
-
-      if (obj.forceLogin === true && !connectionState.isConnected) {
-        log(LOG_LEVELS.INFO, "🔐 LOGIN ...");
-        session = obj.session;
-        client.send(
-          JSON.stringify({
-            requestType: "login",
-            username: clientConfig.username,
-            password: hashPassword(clientConfig.password),
-            session: session,
-            maxRequests: 10,
-          })
-        );
-        return;
-      }
-
-      if (obj.responseType === "login" && obj.result === true) {
-        if (!interval_on) {
-          interval_on = true;
-          // Start fixed interval system for now
-          setInterval(interval, INTERVAL_DELAY);
-          log(LOG_LEVELS.INFO, `🌍 Started fixed WebSocket frequency (${INTERVAL_DELAY}ms)`);
+  // Optimized message handler with error handling
+  client.onmessage = function (e) {
+    // Allow login messages even when not fully connected
+    if (typeof e.data === "string") {
+      try {
+        if (!validateResponse(e.data)) {
+          log(LOG_LEVELS.WARN, "⚠️ Invalid response received, skipping processing");
+          return;
         }
-        log(LOG_LEVELS.INFO, "✅ ...LOGGED");
-        log(LOG_LEVELS.INFO, `🔑 SESSION ${session}`);
-        connectionState.isConnected = true; // Mark as connected after successful login
 
-        // Refresh LED states after successful reconnection to ensure MIDI matches current state
-        if (connectionState.reconnectAttempts > 0) {
-          log(LOG_LEVELS.INFO, "🔄 WebSocket reconnection successful, refreshing LED states...");
-          setTimeout(() => refreshLedStates(), 1000); // Small delay to ensure data processing has started
+        const obj = JSON.parse(e.data);
+
+        // Handle login and connection establishment first
+        if (obj.status === "server ready") {
+          log(LOG_LEVELS.INFO, "🟢 SERVER READY");
+          client.send(JSON.stringify({ session: 0 }));
+          return;
         }
-        return;
-      }
 
-      if (obj.connections_limit_reached !== undefined) {
-        log(LOG_LEVELS.ERROR, "Connection limit reached - too many simultaneous connections");
-        log(LOG_LEVELS.ERROR, "Please close other MA2 Web Remote connections and try again");
-        connectionState.isConnected = false;
-        scheduleReconnection();
-        return;
-      }
-
-      // Only check connection state for non-login messages
-      if (!connectionState.isConnected) {
-        log(LOG_LEVELS.WARN, `⚠️ Received message but not connected (${obj.responseType || "unknown"}), ignoring`);
-        if (!obj.responseType) {
-          log(LOG_LEVELS.WARN, `🔍 Object: ${JSON.stringify(obj)}`);
-        }
-        return;
-      }
-
-      if (request >= REQUEST_THRESHOLD) {
-        try {
-          client.send(JSON.stringify({ session: session }));
+        if (obj.forceLogin === true && !connectionState.isConnected) {
+          log(LOG_LEVELS.INFO, "🔐 LOGIN ...");
+          session = obj.session;
           client.send(
             JSON.stringify({
-              requestType: "getdata",
-              data: "set,clear,solo,high",
+              requestType: "login",
+              username: clientConfig.username,
+              password: hashPassword(clientConfig.password),
               session: session,
-              maxRequests: 1,
+              maxRequests: 10,
             })
           );
-          request = 0;
-        } catch (error) {
-          log(LOG_LEVELS.ERROR, "💥 Failed to send request", error);
-        }
-      }
-
-      if (obj.session === 0) {
-        log(LOG_LEVELS.ERROR, "🔌 CONNECTION ERROR - attempting to reconnect");
-        connectionState.isConnected = false;
-        scheduleReconnection();
-        client.send(JSON.stringify({ session: session }));
-      }
-
-      if (obj.session) {
-        if (obj.session === -1) {
-          log(LOG_LEVELS.ERROR, `🔐 Please turn on Web Remote, and set Web Remote password to "${clientConfig.password}"`);
-          midiclear();
-          input.close();
-          output.close();
-          process.exit(1);
-        } else {
-          session = obj.session;
-        }
-      }
-
-      if (obj.text) {
-        log(LOG_LEVELS.INFO, obj.text);
-      }
-
-      if (obj.responseType === "login" && obj.result === false) {
-        log(LOG_LEVELS.ERROR, "❌ ...LOGIN ERROR");
-        log(LOG_LEVELS.ERROR, `🔑 SESSION ${session}`);
-      }
-
-      if (obj.responseType === "playbacks") {
-        request++;
-
-        if (obj.responseSubType === 3) {
-          // Button LED processing
-          processButtonLEDs(obj);
+          return;
         }
 
-        if (obj.responseSubType === 2) {
-          // Fader LED processing
-          processFaderLEDs(obj);
+        if (obj.responseType === "login" && obj.result === true) {
+          if (!interval_on) {
+            interval_on = true;
+            // Start fixed interval system for now
+            setInterval(interval, INTERVAL_DELAY);
+            log(LOG_LEVELS.INFO, `🌍 Started fixed WebSocket frequency (${INTERVAL_DELAY}ms)`);
+          }
+          log(LOG_LEVELS.INFO, "✅ ...LOGGED");
+          log(LOG_LEVELS.INFO, `🔑 SESSION ${session}`);
+          connectionState.isConnected = true; // Mark as connected after successful login
+
+          // Refresh LED states after successful reconnection to ensure MIDI matches current state
+          if (connectionState.reconnectAttempts > 0) {
+            log(LOG_LEVELS.INFO, "🔄 WebSocket reconnection successful, refreshing LED states...");
+            setTimeout(() => refreshLedStates(), 1000); // Small delay to ensure data processing has started
+          }
+          return;
         }
+
+        if (obj.connections_limit_reached !== undefined) {
+          log(LOG_LEVELS.ERROR, "Connection limit reached - too many simultaneous connections");
+          log(LOG_LEVELS.ERROR, "Please close other MA2 Web Remote connections and try again");
+          connectionState.isConnected = false;
+          scheduleReconnection();
+          return;
+        }
+
+        // Only check connection state for non-login messages
+        if (!connectionState.isConnected) {
+          log(LOG_LEVELS.WARN, `⚠️ Received message but not connected (${obj.responseType || "unknown"}), ignoring`);
+          if (!obj.responseType) {
+            log(LOG_LEVELS.WARN, `🔍 Object: ${JSON.stringify(obj)}`);
+          }
+          return;
+        }
+
+        if (request >= REQUEST_THRESHOLD) {
+          try {
+            client.send(JSON.stringify({ session: session }));
+            client.send(
+              JSON.stringify({
+                requestType: "getdata",
+                data: "set,clear,solo,high",
+                session: session,
+                maxRequests: 1,
+              })
+            );
+            request = 0;
+          } catch (error) {
+            log(LOG_LEVELS.ERROR, "💥 Failed to send request", error);
+          }
+        }
+
+        if (obj.session === 0) {
+          log(LOG_LEVELS.ERROR, "🔌 CONNECTION ERROR - attempting to reconnect");
+          connectionState.isConnected = false;
+          scheduleReconnection();
+          client.send(JSON.stringify({ session: session }));
+        }
+
+        if (obj.session) {
+          if (obj.session === -1) {
+            log(LOG_LEVELS.ERROR, `🔐 Please turn on Web Remote, and set Web Remote password to "${clientConfig.password}"`);
+            midiclear();
+            input.close();
+            output.close();
+            process.exit(1);
+          } else {
+            session = obj.session;
+          }
+        }
+
+        if (obj.text) {
+          log(LOG_LEVELS.INFO, obj.text);
+        }
+
+        if (obj.responseType === "login" && obj.result === false) {
+          log(LOG_LEVELS.ERROR, "❌ ...LOGIN ERROR");
+          log(LOG_LEVELS.ERROR, `🔑 SESSION ${session}`);
+        }
+
+        if (obj.responseType === "playbacks") {
+          request++;
+
+          if (obj.responseSubType === 3) {
+            // Button LED processing
+            processButtonLEDs(obj);
+          }
+
+          if (obj.responseSubType === 2) {
+            // Fader LED processing
+            processFaderLEDs(obj);
+          }
+        }
+      } catch (error) {
+        log(LOG_LEVELS.ERROR, "💥 Error processing message", error);
       }
-    } catch (error) {
-      log(LOG_LEVELS.ERROR, "💥 Error processing message", error);
     }
-  }
-};
+  };
+}
 
 // Process button LED feedback for different wing configurations
 function processButtonLEDs(obj) {
