@@ -154,7 +154,7 @@ let client = new W3CWebSocket(`ws://${WS_URL}:80/`);
 // Connection management functions
 function initializeConnection() {
   log(LOG_LEVELS.INFO, "🔌 Initializing connection to GrandMA2...");
-  
+
   // Set up WebSocket event handlers
   setupWebSocketHandlers(client);
 }
@@ -171,17 +171,17 @@ function scheduleReconnection() {
   setTimeout(async () => {
     if (!connectionState.isConnected) {
       log(LOG_LEVELS.INFO, "🔄 Attempting to reconnect...");
-      
+
       // Step 1: Reconnect MIDI devices first
       log(LOG_LEVELS.INFO, "🎹 Reconnecting MIDI devices...");
       await initializeMidiDevices();
       setupMidiEventListeners();
-      
+
       // Step 2: Then reconnect WebSocket
       log(LOG_LEVELS.INFO, "🌐 Reconnecting WebSocket...");
       client = new W3CWebSocket(`ws://${WS_URL}:80/`);
       initializeConnection();
-      
+
       // Reset connection state for new connection
       connectionState.isConnected = false;
     }
@@ -522,7 +522,7 @@ function toggleDebugMode() {
   if (debugMode) {
     log(LOG_LEVELS.INFO, "📊 Debug mode active - MIDI data will be logged");
     log(LOG_LEVELS.INFO, "🎹 Press notes 8, 9, 10 in sequence to toggle debug mode");
-    log(LOG_LEVELS.INFO, "📋 Press note 11 to dump current LED matrix");
+    log(LOG_LEVELS.INFO, "📋 Press note 11 to dump current LED matrix with server data");
     log(LOG_LEVELS.INFO, "📋 Press note 12 to dump current page state");
     log(LOG_LEVELS.INFO, "📋 Press note 13 to dump recent MIDI messages");
     log(LOG_LEVELS.INFO, "📋 Press note 14 to dump performance stats");
@@ -531,7 +531,7 @@ function toggleDebugMode() {
 }
 
 function dumpLEDMatrix() {
-  const filepath = debugDump.dumpLEDMatrix(ledmatrix, led_isrun, pageIndex, pageIndex2, WING_CONFIGURATION, TOTAL_LEDS);
+  const filepath = debugDump.dumpLEDMatrix(ledmatrix, led_isrun, pageIndex, pageIndex2, WING_CONFIGURATION, TOTAL_LEDS, lastServerData);
   if (filepath) {
     log(LOG_LEVELS.INFO, `📊 LED Matrix dump saved to: ${filepath}`);
   } else {
@@ -1480,6 +1480,26 @@ function setupWebSocketHandlers(client) {
 function processButtonLEDs(obj) {
   const itemGroups = obj.itemGroups[0].items;
 
+  // Store itemGroups structure for debugging (only once per update)
+  if (!lastServerData.itemGroupsStructure) {
+    lastServerData.itemGroupsStructure = {
+      responseType: obj.responseType,
+      responseSubType: obj.responseSubType,
+      itemGroupsCount: obj.itemGroups.length,
+      itemsCount: itemGroups.length,
+      structure: []
+    };
+    
+    // Store the structure of the first few rows
+    for (let i = 0; i < Math.min(5, itemGroups.length); i++) {
+      lastServerData.itemGroupsStructure.structure.push({
+        row: i,
+        itemCount: itemGroups[i].length,
+        firstItem: itemGroups[i].length > 0 ? itemGroups[i][0] : null
+      });
+    }
+  }
+
   if (WING_CONFIGURATION === 1) {
     processWing1ButtonLEDs(itemGroups);
   } else if (WING_CONFIGURATION === 2) {
@@ -1489,146 +1509,151 @@ function processButtonLEDs(obj) {
   }
 }
 
+// ============================================================================
+// LED DATA PROCESSING HANDLERS
+// ============================================================================
+
+/**
+ * Generic LED data processor that handles the itemGroups structure
+ * @param {Array} itemGroups - The itemGroups array from GrandMA2
+ * @param {Object} config - Configuration object for processing
+ * @param {Array} config.sections - Array of section configurations
+ * @param {number} config.sections[].startLedIndex - Starting LED index for this section
+ * @param {number} config.sections[].startRowIndex - Starting row index in itemGroups
+ * @param {number} config.sections[].rowCount - Number of rows to process
+ * @param {number} config.sections[].buttonsPerRow - Number of buttons per row
+ * @param {number} config.sections[].rowIncrement - How much to increment rowIndex between rows
+ * @param {number} config.sections[].ledReset - How much to reset LED index between rows
+ * @param {Function} config.sections[].filter - Optional filter function for LED processing
+ */
+function processLedData(itemGroups, config) {
+  config.sections.forEach((section, sectionIndex) => {
+    let currentLedIndex = section.startLedIndex;
+    let currentRowIndex = section.startRowIndex;
+
+    // Process all LEDs in this section
+    for (let row = 0; row < section.rowCount; row++) {
+      let buttonIndex = 0;
+      let endLedIndex = currentLedIndex + section.buttonsPerRow;
+
+      // Process all LEDs in this row with the same row index
+      while (currentLedIndex < endLedIndex) {
+        const executorItem = itemGroups[currentRowIndex][buttonIndex];
+
+        if (executorItem && executorItem.combinedItems) {
+          for (let item = 0; item < executorItem.combinedItems; item++) {
+            // Apply filter if provided
+            if (!section.filter || section.filter(currentLedIndex, endLedIndex)) {
+              processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
+            }
+            currentLedIndex++;
+          }
+        }
+        buttonIndex++;
+      }
+
+      // Move to next row in itemGroups for this section
+      currentRowIndex += section.rowIncrement;
+      // Reset LED index to start of next row in LED grid
+      currentLedIndex += section.ledReset;
+    }
+  });
+}
+
+// ============================================================================
+// WING-SPECIFIC LED PROCESSING CONFIGURATIONS
+// ============================================================================
+
+// Wing 1 configuration
+const WING1_BUTTON_CONFIG = {
+  sections: [
+    {
+      // First section: 6 rows of 5 buttons each (starting from LED 56)
+      startLedIndex: 56,
+      startRowIndex: 0,
+      rowCount: 6,
+      buttonsPerRow: 5,
+      rowIncrement: 3,
+      ledReset: -13,
+    },
+    {
+      // Second section: 6 rows of 3 buttons each (starting from LED 61)
+      startLedIndex: 61,
+      startRowIndex: 1,
+      rowCount: 6,
+      buttonsPerRow: 3,
+      rowIncrement: 3,
+      ledReset: -11,
+    },
+  ],
+};
+
+// Wing 2 configuration
+const WING2_BUTTON_CONFIG = {
+  sections: [
+    {
+      // First section: 6 rows of 5 buttons each (starting from LED 54)
+      startLedIndex: 54,
+      startRowIndex: 1,
+      rowCount: 6,
+      buttonsPerRow: 5,
+      rowIncrement: 3,
+      ledReset: -13,
+      filter: (currentLedIndex, endLedIndex) => currentLedIndex >= endLedIndex - 3, // Only process last 3 LEDs
+    },
+    {
+      // Second section: 6 rows of 5 buttons each (starting from LED 59)
+      startLedIndex: 59,
+      startRowIndex: 2,
+      rowCount: 6,
+      buttonsPerRow: 5,
+      rowIncrement: 3,
+      ledReset: -13,
+    },
+  ],
+};
+
+// Wing 3 configuration
+const WING3_BUTTON_CONFIG = {
+  sections: [
+    {
+      // First section: 8 rows of 5 buttons each (starting from LED 56)
+      startLedIndex: 56,
+      startRowIndex: 0,
+      rowCount: 8,
+      buttonsPerRow: 5,
+      rowIncrement: 2,
+      ledReset: -13,
+    },
+    {
+      // Second section: 8 rows of 3 buttons each (starting from LED 61)
+      startLedIndex: 61,
+      startRowIndex: 1,
+      rowCount: 8,
+      buttonsPerRow: 3,
+      rowIncrement: 2,
+      ledReset: -11,
+    },
+  ],
+};
+
+// ============================================================================
+// REFACTORED WING PROCESSING FUNCTIONS
+// ============================================================================
+
 // Process button LEDs for Wing 1 configuration
 function processWing1ButtonLEDs(itemGroups) {
-  // First section: 6 rows of 5 buttons each (starting from LED 56)
-  let currentLedIndex = 56;
-  let currentRowIndex = 0;
-
-  for (let row = 0; row < 6; row++) {
-    let buttonIndex = 0;
-    let endLedIndex = currentLedIndex + 5;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-        currentLedIndex++;
-      }
-      buttonIndex++;
-    }
-    currentRowIndex += 3;
-    currentLedIndex -= 13; // Reset to start of next row
-  }
-
-  // Second section: 6 rows of 3 buttons each (starting from LED 61)
-  currentRowIndex = 1;
-  currentLedIndex = 61;
-
-  for (let row = 0; row < 6; row++) {
-    let buttonIndex = 0;
-    let endLedIndex = currentLedIndex + 3;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        if (currentLedIndex < endLedIndex) {
-          processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-          currentLedIndex++;
-        }
-      }
-      buttonIndex++;
-    }
-    currentRowIndex += 3;
-    currentLedIndex -= 11; // Reset to start of next row
-  }
+  processLedData(itemGroups, WING1_BUTTON_CONFIG);
 }
 
 // Process button LEDs for Wing 2 configuration
 function processWing2ButtonLEDs(itemGroups) {
-  // First section: 6 rows of 5 buttons each (starting from LED 54)
-  let currentLedIndex = 54;
-  let currentRowIndex = 1;
-
-  for (let row = 0; row < 6; row++) {
-    let buttonIndex = 0;
-    let endLedIndex = currentLedIndex + 5;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        // Only process the last 3 LEDs in each row
-        if (currentLedIndex >= endLedIndex - 3) {
-          processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-        }
-        currentLedIndex++;
-      }
-      buttonIndex++;
-    }
-    currentRowIndex += 3;
-    currentLedIndex -= 13; // Reset to start of next row
-  }
-
-  // Second section: 6 rows of 5 buttons each (starting from LED 59)
-  currentRowIndex = 2;
-  currentLedIndex = 59;
-
-  for (let row = 0; row < 6; row++) {
-    let buttonIndex = 0;
-    let endLedIndex = currentLedIndex + 5;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-        currentLedIndex++;
-      }
-      buttonIndex++;
-    }
-    currentRowIndex += 3;
-    currentLedIndex -= 13; // Reset to start of next row
-  }
+  processLedData(itemGroups, WING2_BUTTON_CONFIG);
 }
 
 // Process button LEDs for Wing 3 configuration
 function processWing3ButtonLEDs(itemGroups) {
-  // First section: 8 rows of 5 buttons each (starting from LED 56)
-  let currentLedIndex = 56;
-  let currentRowIndex = 0;
-
-  for (let row = 0; row < 8; row++) {
-    let buttonIndex = 0;
-    let endLedIndex = currentLedIndex + 5;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-        currentLedIndex++;
-      }
-      buttonIndex++;
-    }
-    currentRowIndex += 2;
-    currentLedIndex -= 13; // Reset to start of next row
-  }
-
-  // Second section: 8 rows of 3 buttons each (starting from LED 61)
-  currentRowIndex = 1;
-  currentLedIndex = 61;
-
-  for (let row = 0; row < 8; row++) {
-    let buttonIndex = 0;
-    let endLedIndex = currentLedIndex + 3;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        if (currentLedIndex < endLedIndex) {
-          processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-          currentLedIndex++;
-        }
-      }
-      buttonIndex++;
-    }
-    currentRowIndex += 2;
-    currentLedIndex -= 11; // Reset to start of next row
-  }
+  processLedData(itemGroups, WING3_BUTTON_CONFIG);
 }
 
 // Process fader LED feedback for different wing configurations
@@ -1644,142 +1669,171 @@ function processFaderLEDs(obj) {
   }
 }
 
+// ============================================================================
+// FADER LED PROCESSING CONFIGURATIONS
+// ============================================================================
+
+// Wing 1 fader configuration
+const WING1_FADER_CONFIG = {
+  sections: [
+    {
+      // First section: 5 faders (LEDs 0-4)
+      startLedIndex: 0,
+      startRowIndex: 0,
+      rowCount: 1,
+      buttonsPerRow: 5,
+      rowIncrement: 0,
+      ledReset: 0,
+    },
+    {
+      // Second section: 3 faders (LEDs 5-7)
+      startLedIndex: 5,
+      startRowIndex: 1,
+      rowCount: 1,
+      buttonsPerRow: 3,
+      rowIncrement: 0,
+      ledReset: 0,
+    },
+  ],
+};
+
+// Wing 2 fader configuration
+const WING2_FADER_CONFIG = {
+  sections: [
+    {
+      // First section: 5 faders (LEDs 0-4, starting from -2)
+      startLedIndex: -2,
+      startRowIndex: 1,
+      rowCount: 1,
+      buttonsPerRow: 5,
+      rowIncrement: 0,
+      ledReset: 0,
+      filter: (currentLedIndex) => currentLedIndex >= 0, // Only process LEDs 0 and above
+    },
+    {
+      // Second section: 5 faders (LEDs 3-7)
+      startLedIndex: 3,
+      startRowIndex: 2,
+      rowCount: 1,
+      buttonsPerRow: 5,
+      rowIncrement: 0,
+      ledReset: 0,
+    },
+  ],
+};
+
+// Wing 3 fader configuration (special handling for direct LED control)
+const WING3_FADER_CONFIG = {
+  sections: [
+    {
+      // First section: 5 faders (LEDs 0-4)
+      startLedIndex: 0,
+      startRowIndex: 0,
+      rowCount: 1,
+      buttonsPerRow: 5,
+      rowIncrement: 0,
+      ledReset: 0,
+    },
+    {
+      // Second section: 3 faders (LEDs 5-7)
+      startLedIndex: 5,
+      startRowIndex: 1,
+      rowCount: 1,
+      buttonsPerRow: 3,
+      rowIncrement: 0,
+      ledReset: 0,
+    },
+  ],
+};
+
+/**
+ * Special fader data processor for Wing 3 that handles direct LED control
+ * @param {Array} itemGroups - The itemGroups array from GrandMA2
+ * @param {Object} config - Configuration object for processing
+ */
+function processWing3FaderData(itemGroups, config) {
+  config.sections.forEach((section) => {
+    let currentLedIndex = section.startLedIndex;
+    let currentRowIndex = section.startRowIndex;
+
+    for (let row = 0; row < section.rowCount; row++) {
+      let buttonIndex = 0;
+      let endLedIndex = currentLedIndex + section.buttonsPerRow;
+
+      while (currentLedIndex < endLedIndex) {
+        const executorItem = itemGroups[currentRowIndex][buttonIndex];
+
+        if (executorItem && executorItem.combinedItems) {
+          for (let item = 0; item < executorItem.combinedItems; item++) {
+            // Apply filter if provided
+            if (!section.filter || section.filter(currentLedIndex, endLedIndex)) {
+              // For Wing 3, directly control LED brightness based on isRun status
+              const isRunning = Boolean(executorItem.isRun);
+              const velocity = isRunning ? 1 : 0;
+
+              output.send("noteon", {
+                note: currentLedIndex + 100, // Fader LEDs are at 100+
+                velocity: velocity,
+                channel: 0,
+              });
+            }
+            currentLedIndex++;
+          }
+        }
+        buttonIndex++;
+      }
+
+      currentRowIndex += section.rowIncrement;
+      currentLedIndex += section.ledReset;
+    }
+  });
+}
+
+// ============================================================================
+// REFACTORED FADER PROCESSING FUNCTIONS
+// ============================================================================
+
 // Process fader LEDs for Wing 1 configuration
 function processWing1FaderLEDs(itemGroups) {
-  // First section: 5 faders (LEDs 0-4)
-  let currentLedIndex = 0;
-  let currentRowIndex = 0;
-  let buttonIndex = 0;
-  let endLedIndex = currentLedIndex + 5;
-
-  while (currentLedIndex < endLedIndex) {
-    const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-    for (let item = 0; item < combinedItems; item++) {
-      processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-      currentLedIndex++;
-    }
-    buttonIndex++;
-  }
-
-  // Second section: 3 faders (LEDs 5-7)
-  currentRowIndex = 1;
-  currentLedIndex = 5;
-  buttonIndex = 0;
-  endLedIndex = currentLedIndex + 3;
-
-  while (currentLedIndex < endLedIndex) {
-    const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-    for (let item = 0; item < combinedItems; item++) {
-      if (currentLedIndex < endLedIndex) {
-        processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-        currentLedIndex++;
-      }
-    }
-    buttonIndex++;
-  }
+  processLedData(itemGroups, WING1_FADER_CONFIG);
 }
 
 // Process fader LEDs for Wing 2 configuration
 function processWing2FaderLEDs(itemGroups) {
-  // First section: 5 faders (LEDs 0-4, starting from -2)
-  let currentLedIndex = -2;
-  let currentRowIndex = 1;
-  let buttonIndex = 0;
-  let endLedIndex = currentLedIndex + 5;
-
-  while (currentLedIndex < endLedIndex) {
-    const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-    for (let item = 0; item < combinedItems; item++) {
-      // Only process LEDs 0 and above (skip negative indices)
-      if (currentLedIndex >= 0) {
-        processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-      }
-      currentLedIndex++;
-    }
-    buttonIndex++;
-  }
-
-  // Second section: 5 faders (LEDs 3-7)
-  currentRowIndex = 2;
-  currentLedIndex = 3;
-
-  for (let row = 0; row < 1; row++) {
-    buttonIndex = 0;
-    endLedIndex = currentLedIndex + 5;
-
-    while (currentLedIndex < endLedIndex) {
-      const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-      for (let item = 0; item < combinedItems; item++) {
-        processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-        currentLedIndex++;
-      }
-      buttonIndex++;
-    }
-  }
+  processLedData(itemGroups, WING2_FADER_CONFIG);
 }
 
 // Process fader LEDs for Wing 3 configuration
 function processWing3FaderLEDs(itemGroups) {
-  // First section: 5 faders (LEDs 0-4)
-  let currentLedIndex = 0;
-  let currentRowIndex = 0;
-  let buttonIndex = 0;
-  let endLedIndex = currentLedIndex + 5;
-
-  while (currentLedIndex < endLedIndex) {
-    const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-    for (let item = 0; item < combinedItems; item++) {
-      // For Wing 3, directly control LED brightness based on isRun status
-      const isRunning = Boolean(itemGroups[currentRowIndex][buttonIndex].isRun);
-      const velocity = isRunning ? 1 : 0;
-
-      output.send("noteon", {
-        note: currentLedIndex + 100, // Fader LEDs are at 100+
-        velocity: velocity,
-        channel: 0,
-      });
-      currentLedIndex++;
-    }
-    buttonIndex++;
-  }
-
-  // Second section: 3 faders (LEDs 5-7)
-  currentRowIndex = 1;
-  currentLedIndex = 5;
-  buttonIndex = 0;
-  endLedIndex = currentLedIndex + 3;
-
-  while (currentLedIndex < endLedIndex) {
-    const combinedItems = itemGroups[currentRowIndex][buttonIndex].combinedItems;
-
-    for (let item = 0; item < combinedItems; item++) {
-      if (currentLedIndex < endLedIndex) {
-        // For Wing 3, directly control LED brightness based on isRun status
-        const isRunning = itemGroups[currentRowIndex][buttonIndex].isRun === 1;
-        const velocity = isRunning ? 1 : 0;
-
-        output.send("noteon", {
-          note: currentLedIndex + 100, // Fader LEDs are at 100+
-          velocity: velocity,
-          channel: 0,
-        });
-        currentLedIndex++;
-      }
-    }
-    buttonIndex++;
-  }
+  processWing3FaderData(itemGroups, WING3_FADER_CONFIG);
 }
+
+// Global variables for server data tracking
+let lastServerData = {
+  leds: {}, // Store data for all LEDs
+  timestamp: null,
+  itemGroupsStructure: null // Store itemGroups structure for debugging
+};
 
 // Update LED feedback based on executor status and color configuration
 function processLedFeedback(buttonIndex, ledIndex, rowIndex, itemGroups) {
   const executorItem = itemGroups[rowIndex][buttonIndex];
   const isRunning = Boolean(executorItem.isRun);
   const backgroundColor = executorItem.bdC;
+
+  // Store server data for all LEDs for debugging
+  lastServerData.leds[ledIndex] = {
+    buttonIndex,
+    rowIndex,
+    isRunning,
+    backgroundColor,
+    executorItem: JSON.parse(JSON.stringify(executorItem)), // Deep copy
+    autoColor: clientConfig.autoColor,
+    blink: clientConfig.blink,
+    brightness: clientConfig.brightness,
+    timestamp: new Date().toISOString()
+  };
+  lastServerData.timestamp = new Date().toISOString();
 
   if (clientConfig.autoColor) {
     processAutoColorMode(ledIndex, isRunning, backgroundColor);

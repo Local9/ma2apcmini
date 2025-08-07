@@ -27,7 +27,7 @@ function writeDumpFile(filename, content) {
 }
 
 // LED Matrix Dump with detailed explanations
-function dumpLEDMatrix(ledmatrix, led_isrun, pageIndex, pageIndex2, wingConfig, totalLeds) {
+function dumpLEDMatrix(ledmatrix, led_isrun, pageIndex, pageIndex2, wingConfig, totalLeds, serverData = null) {
   const filename = getTimestampedFilename("led_matrix");
 
   let content = `=== LED MATRIX DUMP ===
@@ -72,17 +72,17 @@ Velocity | Color     | Velocity | Color     | Velocity | Color     | Velocity | 
 18       | #1D5900   | 50       | #190064   | 82       | #B21A7D   | 114      | #80FFBD
 19       | #142B00   | 51       | #0F0030   | 83       | #402100   | 115      | #9A99FF
 20       | #4CFF4C   | 52       | #FF4CFF   | 84       | #FF4A00   | 116      | #8E66FF
-21       | #00FF00   | 53       | #FF00FF   | 85       | #88E106   | 117      | #404040
-22       | #005900   | 54       | #590059   | 86       | #72FF15   | 118      | #757575
-23       | #001900   | 55       | #190019   | 87       | #00FF00   | 119      | #E0FFFF
-24       | #4CFF5E   | 56       | #FF4C87   | 88       | #3BFF26   | 120      | #A00000
-25       | #00FF19   | 57       | #FF0054   | 89       | #59FF71   | 121      | #350000
-26       | #00590D   | 58       | #59001D   | 90       | #38FFCC   | 122      | #1AD000
-27       | #001902   | 59       | #220013   | 91       | #5B8AFF   | 123      | #074200
-28       | #4CFF88   | 60       | #FF1500   | 92       | #3151C6   | 124      | #B9B000
-29       | #00FF55   | 61       | #993500   | 93       | #877FE9   | 125      | #3F3100
-30       | #00591D   | 62       | #795100   | 94       | #D31DFF   | 126      | #B35F00
-31       | #001F12   | 63       | #436400   | 95       | #FF005D   | 127      | #4B1502
+21       | #00FF00   | 53       | #FF00FF   | 87       | #00FF00   | 117      | #404040
+22       | #005900   | 54       | #590059   | 88       | #3BFF26   | 118      | #757575
+23       | #001900   | 55       | #190019   | 89       | #59FF71   | 119      | #E0FFFF
+24       | #4CFF5E   | 56       | #FF4C87   | 90       | #38FFCC   | 120      | #A00000
+25       | #00FF19   | 57       | #FF0054   | 91       | #5B8AFF   | 121      | #350000
+26       | #00590D   | 58       | #59001D   | 92       | #3151C6   | 122      | #1AD000
+27       | #001902   | 59       | #220013   | 93       | #877FE9   | 123      | #074200
+28       | #4CFF88   | 60       | #FF1500   | 94       | #D31DFF   | 124      | #B9B000
+29       | #00FF55   | 61       | #993500   | 95       | #FF005D   | 125      | #3F3100
+30       | #00591D   | 62       | #795100   | 96       | #FF7F00   | 126      | #B35F00
+31       | #001F12   | 63       | #436400   | 97       | #B9B000   | 127      | #4B1502
 
 LED MAPPING:
 - LEDs 0-7: Fader buttons (Wing 1: 0-4, 5-7; Wing 2: 0-4, 3-7; Wing 3: 0-4, 5-7)
@@ -90,7 +90,7 @@ LED MAPPING:
 - LEDs 16-63: Button grid (48 LEDs total)
 - LEDs 64-119: Unused
 
-FORMAT: LED_Index: Color/Brightness_Mode
+FORMAT: LED_Index: Color/Brightness_Mode [Server Data]
 
 `;
 
@@ -99,28 +99,62 @@ FORMAT: LED_Index: Color/Brightness_Mode
     { name: "FADER BUTTONS (0-7)", start: 0, end: 7 },
     { name: "DEBUG KEYS (8-15)", start: 8, end: 15 },
     { name: "BUTTON GRID (16-63)", start: 16, end: 63 },
-    { name: "UNUSED (64-119)", start: 64, end: 119 },
+    { name: "UNUSED (64-119)", start: 64, end: 119 }
   ];
 
-  sections.forEach((section) => {
-    content += `\n${section.name}:\n`;
-    content += `${"=".repeat(section.name.length)}\n`;
-
+  sections.forEach(section => {
+    content += `\n=== ${section.name} ===\n`;
+    
     for (let i = section.start; i <= section.end; i++) {
-      const color = ledmatrix[i] || 0;
-      const brightness = led_isrun[i] || 0;
-      const status = color > 0 ? "ON" : "OFF";
-      const colorHex = getColorDescription(color);
-
-      const brightnessDesc = getBrightnessModeDescription(brightness);
-      content += `LED ${i.toString().padStart(3)}: ${color.toString().padStart(3)}/${brightness} (${status}, ${brightnessDesc}, ${colorHex})\n`;
+      const velocity = ledmatrix[i] || 0;
+      const channel = led_isrun[i] || 0;
+      const colorDesc = getColorDescription(velocity);
+      const brightnessDesc = getBrightnessModeDescription(channel);
+      
+      let ledLine = `LED ${i.toString().padStart(3)}: ${velocity}/${channel} (${colorDesc}, ${brightnessDesc})`;
+      
+      // Add server data if available
+      if (serverData && serverData.leds && serverData.leds[i]) {
+        const data = serverData.leds[i];
+        ledLine += `\n    Server Data: Button=${data.buttonIndex}, Row=${data.rowIndex}, Running=${data.isRunning}, Color=${data.backgroundColor}`;
+        ledLine += `\n    Config: AutoColor=${data.autoColor}, Blink=${data.blink}, Brightness=${data.brightness}`;
+        ledLine += `\n    Timestamp: ${data.timestamp}`;
+      }
+      
+      content += ledLine + "\n";
     }
   });
 
-  content += `\n=== END LED MATRIX DUMP ===\n`;
+  // Add server data summary if available
+  if (serverData && serverData.leds) {
+    content += `\n=== SERVER DATA SUMMARY ===\n`;
+    content += `Last Update: ${serverData.timestamp}\n`;
+    content += `LEDs with Server Data: ${Object.keys(serverData.leds).length}\n`;
+    
+    // Show which LEDs have server data
+    const ledsWithData = Object.keys(serverData.leds).sort((a, b) => parseInt(a) - parseInt(b));
+    content += `LEDs: ${ledsWithData.join(", ")}\n`;
+  }
 
-  const filepath = writeDumpFile(filename, content);
-  return filepath;
+  // Add itemGroups structure information if available
+  if (serverData && serverData.itemGroupsStructure) {
+    content += `\n=== ITEMGROUPS STRUCTURE ===\n`;
+    content += `Response Type: ${serverData.itemGroupsStructure.responseType}\n`;
+    content += `Response Sub Type: ${serverData.itemGroupsStructure.responseSubType}\n`;
+    content += `Item Groups Count: ${serverData.itemGroupsStructure.itemGroupsCount}\n`;
+    content += `Items Count: ${serverData.itemGroupsStructure.itemsCount}\n`;
+    content += `Structure:\n`;
+    
+    serverData.itemGroupsStructure.structure.forEach(row => {
+      content += `  Row ${row.row}: ${row.itemCount} items`;
+      if (row.firstItem) {
+        content += ` (first: ${JSON.stringify(row.firstItem)})`;
+      }
+      content += `\n`;
+    });
+  }
+
+  return writeDumpFile(filename, content);
 }
 
 // Page State Dump with explanations
