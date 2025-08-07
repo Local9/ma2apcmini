@@ -181,7 +181,7 @@ function scheduleReconnection() {
       setupMidiEventListeners();
 
       // Step 2: Then reconnect WebSocket
-      log(LOG_LEVELS.INFO, "🌐 Reconnecting WebSocket...");
+      log(LOG_LEVELS.INFO, "🌍 Reconnecting WebSocket...");
       client = new W3CWebSocket(`ws://${WS_URL}:80/`);
       initializeConnection();
 
@@ -1401,6 +1401,7 @@ function setupWebSocketHandlers(client) {
         if (obj.responseType === "login" && obj.result === false) {
           log(LOG_LEVELS.ERROR, "❌ ...LOGIN ERROR");
           log(LOG_LEVELS.ERROR, `🔑 SESSION ${session}`);
+          scheduleReconnection();
           return;
         }
 
