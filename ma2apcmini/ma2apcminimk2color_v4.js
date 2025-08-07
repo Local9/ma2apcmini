@@ -12,6 +12,9 @@ const marquee = require("./performance/marquee");
 // Import debug dump module
 const debugDump = require("./dump/debug-dump");
 
+// Import LED mapping configuration
+const { getExecutorData } = require("./config/led-mappings");
+
 // ============================================================================
 // USER CONFIGURATION SECTION - MODIFY THESE SETTINGS AS NEEDED
 // ============================================================================
@@ -1465,7 +1468,7 @@ function setupWebSocketHandlers(client) {
           }
 
           if (obj.responseSubType === 2) {
-            // Fader LED processing
+            // Fader LED processing - separate function for fader-specific handling
             processFaderLEDs(obj);
           }
         }
@@ -1500,12 +1503,87 @@ function processButtonLEDs(obj) {
     }
   }
 
-  if (WING_CONFIGURATION === 1) {
-    processWing1ButtonLEDs(itemGroups);
-  } else if (WING_CONFIGURATION === 2) {
-    processWing2ButtonLEDs(itemGroups);
-  } else if (WING_CONFIGURATION === 3) {
-    processWing3ButtonLEDs(itemGroups);
+  // Process only button LEDs (16-63) using the mapping configuration
+  for (let ledIndex = 16; ledIndex <= 63; ledIndex++) {
+    const executorData = getExecutorData(ledIndex, WING_CONFIGURATION, itemGroups);
+    
+    if (executorData) {
+      const { executorItem, mapping } = executorData;
+      const isRunning = Boolean(executorItem.isRun);
+      const backgroundColor = executorItem.bdC;
+
+      // Store server data for debugging
+      lastServerData.leds[ledIndex] = {
+        buttonIndex: mapping.button,
+        rowIndex: mapping.row,
+        isRunning,
+        backgroundColor,
+        executorItem: JSON.parse(JSON.stringify(executorItem)), // Deep copy
+        autoColor: clientConfig.autoColor,
+        blink: clientConfig.blink,
+        brightness: clientConfig.brightness,
+        timestamp: new Date().toISOString(),
+        mapping: mapping,
+        type: "button",
+        combinedItems: mapping.combinedItems || 1,
+        currentExecutor: mapping.currentExecutor,
+        baseExecutor: mapping.baseExecutor,
+        isFirstInCombined: mapping.isFirstInCombined || false,
+        inheritedFrom: mapping.inheritedFrom
+      };
+      lastServerData.timestamp = new Date().toISOString();
+
+      // Process the LED feedback
+      if (clientConfig.autoColor) {
+        processAutoColorMode(ledIndex, isRunning, backgroundColor);
+      } else {
+        processManualColorMode(ledIndex, isRunning, backgroundColor);
+      }
+    }
+  }
+}
+
+// Process fader LED feedback using mapping configuration
+function processFaderLEDs(obj) {
+  const itemGroups = obj.itemGroups[0].items;
+
+  // Process only fader LEDs (0-7) using the mapping configuration
+  for (let ledIndex = 0; ledIndex <= 7; ledIndex++) {
+    const executorData = getExecutorData(ledIndex, WING_CONFIGURATION, itemGroups);
+    
+    if (executorData) {
+      const { executorItem, mapping } = executorData;
+      const isRunning = Boolean(executorItem.isRun);
+      const backgroundColor = executorItem.bdC;
+
+      // Store server data for debugging
+      lastServerData.leds[ledIndex] = {
+        buttonIndex: mapping.button,
+        rowIndex: mapping.row,
+        isRunning,
+        backgroundColor,
+        executorItem: JSON.parse(JSON.stringify(executorItem)), // Deep copy
+        autoColor: clientConfig.autoColor,
+        blink: clientConfig.blink,
+        brightness: clientConfig.brightness,
+        timestamp: new Date().toISOString(),
+        mapping: mapping,
+        type: "fader",
+        combinedItems: mapping.combinedItems || 1,
+        currentExecutor: mapping.currentExecutor,
+        baseExecutor: mapping.baseExecutor,
+        isFirstInCombined: mapping.isFirstInCombined || false,
+        inheritedFrom: mapping.inheritedFrom
+      };
+      lastServerData.timestamp = new Date().toISOString();
+
+      // Process the fader LED feedback
+      if (clientConfig.autoColor) {
+        processAutoColorMode(ledIndex, isRunning, backgroundColor);
+      } else {
+        processManualColorMode(ledIndex, isRunning, backgroundColor);
+      }
+    }
   }
 }
 
@@ -1513,238 +1591,22 @@ function processButtonLEDs(obj) {
 // LED DATA PROCESSING HANDLERS
 // ============================================================================
 
-/**
- * Generic LED data processor that handles the itemGroups structure
- * @param {Array} itemGroups - The itemGroups array from GrandMA2
- * @param {Object} config - Configuration object for processing
- * @param {Array} config.sections - Array of section configurations
- * @param {number} config.sections[].startLedIndex - Starting LED index for this section
- * @param {number} config.sections[].startRowIndex - Starting row index in itemGroups
- * @param {number} config.sections[].rowCount - Number of rows to process
- * @param {number} config.sections[].buttonsPerRow - Number of buttons per row
- * @param {number} config.sections[].rowIncrement - How much to increment rowIndex between rows
- * @param {number} config.sections[].ledReset - How much to reset LED index between rows
- * @param {Function} config.sections[].filter - Optional filter function for LED processing
- */
-function processLedData(itemGroups, config) {
-  config.sections.forEach((section, sectionIndex) => {
-    let currentLedIndex = section.startLedIndex;
-    let currentRowIndex = section.startRowIndex;
-
-    // Process all LEDs in this section
-    for (let row = 0; row < section.rowCount; row++) {
-      let buttonIndex = 0;
-      let endLedIndex = currentLedIndex + section.buttonsPerRow;
-
-      // Process all LEDs in this row with the same row index
-      while (currentLedIndex < endLedIndex) {
-        const executorItem = itemGroups[currentRowIndex][buttonIndex];
-
-        if (executorItem && executorItem.combinedItems) {
-          for (let item = 0; item < executorItem.combinedItems; item++) {
-            // Apply filter if provided
-            if (!section.filter || section.filter(currentLedIndex, endLedIndex)) {
-              processLedFeedback(buttonIndex, currentLedIndex, currentRowIndex, itemGroups);
-            }
-            currentLedIndex++;
-          }
-        }
-        buttonIndex++;
-      }
-
-      // Move to next row in itemGroups for this section
-      currentRowIndex += section.rowIncrement;
-      // Reset LED index to start of next row in LED grid
-      currentLedIndex += section.ledReset;
-    }
-  });
-}
-
-// ============================================================================
-// WING-SPECIFIC LED PROCESSING CONFIGURATIONS
-// ============================================================================
-
-// Wing 1 configuration
-const WING1_BUTTON_CONFIG = {
-  sections: [
-    {
-      // First section: 6 rows of 5 buttons each (starting from LED 56)
-      startLedIndex: 56,
-      startRowIndex: 0,
-      rowCount: 6,
-      buttonsPerRow: 5,
-      rowIncrement: 3,
-      ledReset: -13,
-    },
-    {
-      // Second section: 6 rows of 3 buttons each (starting from LED 61)
-      startLedIndex: 61,
-      startRowIndex: 1,
-      rowCount: 6,
-      buttonsPerRow: 3,
-      rowIncrement: 3,
-      ledReset: -11,
-    },
-  ],
-};
-
-// Wing 2 configuration
-const WING2_BUTTON_CONFIG = {
-  sections: [
-    {
-      // First section: 6 rows of 5 buttons each (starting from LED 54)
-      startLedIndex: 54,
-      startRowIndex: 1,
-      rowCount: 6,
-      buttonsPerRow: 5,
-      rowIncrement: 3,
-      ledReset: -13,
-      filter: (currentLedIndex, endLedIndex) => currentLedIndex >= endLedIndex - 3, // Only process last 3 LEDs
-    },
-    {
-      // Second section: 6 rows of 5 buttons each (starting from LED 59)
-      startLedIndex: 59,
-      startRowIndex: 2,
-      rowCount: 6,
-      buttonsPerRow: 5,
-      rowIncrement: 3,
-      ledReset: -13,
-    },
-  ],
-};
-
-// Wing 3 configuration
-const WING3_BUTTON_CONFIG = {
-  sections: [
-    {
-      // First section: 8 rows of 5 buttons each (starting from LED 56)
-      startLedIndex: 56,
-      startRowIndex: 0,
-      rowCount: 8,
-      buttonsPerRow: 5,
-      rowIncrement: 2,
-      ledReset: -13,
-    },
-    {
-      // Second section: 8 rows of 3 buttons each (starting from LED 61)
-      startLedIndex: 61,
-      startRowIndex: 1,
-      rowCount: 8,
-      buttonsPerRow: 3,
-      rowIncrement: 2,
-      ledReset: -11,
-    },
-  ],
-};
+// Note: LED processing is now handled by the mapping configuration in config/led-mappings.js
+// This provides a cleaner, more maintainable approach with explicit LED-to-executor mappings
 
 // ============================================================================
 // REFACTORED WING PROCESSING FUNCTIONS
 // ============================================================================
 
-// Process button LEDs for Wing 1 configuration
-function processWing1ButtonLEDs(itemGroups) {
-  processLedData(itemGroups, WING1_BUTTON_CONFIG);
-}
-
-// Process button LEDs for Wing 2 configuration
-function processWing2ButtonLEDs(itemGroups) {
-  processLedData(itemGroups, WING2_BUTTON_CONFIG);
-}
-
-// Process button LEDs for Wing 3 configuration
-function processWing3ButtonLEDs(itemGroups) {
-  processLedData(itemGroups, WING3_BUTTON_CONFIG);
-}
-
-// Process fader LED feedback for different wing configurations
-function processFaderLEDs(obj) {
-  const itemGroups = obj.itemGroups[0].items;
-
-  if (WING_CONFIGURATION === 1) {
-    processWing1FaderLEDs(itemGroups);
-  } else if (WING_CONFIGURATION === 2) {
-    processWing2FaderLEDs(itemGroups);
-  } else if (WING_CONFIGURATION === 3) {
-    processWing3FaderLEDs(itemGroups);
-  }
-}
+// Note: These functions are no longer needed as we use the mapping configuration
+// The processButtonLEDs function now handles all wing configurations through the mapping
 
 // ============================================================================
 // FADER LED PROCESSING CONFIGURATIONS
 // ============================================================================
 
-// Wing 1 fader configuration
-const WING1_FADER_CONFIG = {
-  sections: [
-    {
-      // First section: 5 faders (LEDs 0-4)
-      startLedIndex: 0,
-      startRowIndex: 0,
-      rowCount: 1,
-      buttonsPerRow: 5,
-      rowIncrement: 0,
-      ledReset: 0,
-    },
-    {
-      // Second section: 3 faders (LEDs 5-7)
-      startLedIndex: 5,
-      startRowIndex: 1,
-      rowCount: 1,
-      buttonsPerRow: 3,
-      rowIncrement: 0,
-      ledReset: 0,
-    },
-  ],
-};
-
-// Wing 2 fader configuration
-const WING2_FADER_CONFIG = {
-  sections: [
-    {
-      // First section: 5 faders (LEDs 0-4, starting from -2)
-      startLedIndex: -2,
-      startRowIndex: 1,
-      rowCount: 1,
-      buttonsPerRow: 5,
-      rowIncrement: 0,
-      ledReset: 0,
-      filter: (currentLedIndex) => currentLedIndex >= 0, // Only process LEDs 0 and above
-    },
-    {
-      // Second section: 5 faders (LEDs 3-7)
-      startLedIndex: 3,
-      startRowIndex: 2,
-      rowCount: 1,
-      buttonsPerRow: 5,
-      rowIncrement: 0,
-      ledReset: 0,
-    },
-  ],
-};
-
-// Wing 3 fader configuration (special handling for direct LED control)
-const WING3_FADER_CONFIG = {
-  sections: [
-    {
-      // First section: 5 faders (LEDs 0-4)
-      startLedIndex: 0,
-      startRowIndex: 0,
-      rowCount: 1,
-      buttonsPerRow: 5,
-      rowIncrement: 0,
-      ledReset: 0,
-    },
-    {
-      // Second section: 3 faders (LEDs 5-7)
-      startLedIndex: 5,
-      startRowIndex: 1,
-      rowCount: 1,
-      buttonsPerRow: 3,
-      rowIncrement: 0,
-      ledReset: 0,
-    },
-  ],
-};
+// Note: Fader processing is now handled by the mapping configuration
+// Faders are mapped in the led-mappings.js file
 
 /**
  * Special fader data processor for Wing 3 that handles direct LED control
@@ -1793,19 +1655,26 @@ function processWing3FaderData(itemGroups, config) {
 // REFACTORED FADER PROCESSING FUNCTIONS
 // ============================================================================
 
+// Note: These functions are no longer needed as we use the mapping configuration
+// Fader processing is now handled by the mapping system
+
+// ============================================================================
+// LEGACY FUNCTIONS (KEPT FOR REFERENCE)
+// ============================================================================
+
 // Process fader LEDs for Wing 1 configuration
 function processWing1FaderLEDs(itemGroups) {
-  processLedData(itemGroups, WING1_FADER_CONFIG);
+  // Legacy function - now handled by mapping
 }
 
 // Process fader LEDs for Wing 2 configuration
 function processWing2FaderLEDs(itemGroups) {
-  processLedData(itemGroups, WING2_FADER_CONFIG);
+  // Legacy function - now handled by mapping
 }
 
 // Process fader LEDs for Wing 3 configuration
 function processWing3FaderLEDs(itemGroups) {
-  processWing3FaderData(itemGroups, WING3_FADER_CONFIG);
+  // Legacy function - now handled by mapping
 }
 
 // Global variables for server data tracking
@@ -1816,6 +1685,9 @@ let lastServerData = {
 };
 
 // Update LED feedback based on executor status and color configuration
+// Note: This function is now handled directly in processButtonLEDs using the mapping approach
+// Keeping this for reference but it's no longer used
+
 function processLedFeedback(buttonIndex, ledIndex, rowIndex, itemGroups) {
   const executorItem = itemGroups[rowIndex][buttonIndex];
   const isRunning = Boolean(executorItem.isRun);

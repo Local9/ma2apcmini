@@ -119,6 +119,18 @@ FORMAT: LED_Index: Color/Brightness_Mode [Server Data]
         ledLine += `\n    Server Data: Button=${data.buttonIndex}, Row=${data.rowIndex}, Running=${data.isRunning}, Color=${data.backgroundColor}`;
         ledLine += `\n    Config: AutoColor=${data.autoColor}, Blink=${data.blink}, Brightness=${data.brightness}`;
         ledLine += `\n    Timestamp: ${data.timestamp}`;
+        if (data.mapping) { // Add mapping info if available
+          ledLine += `\n    Mapping: Executor=${data.mapping.executor}, Desc="${data.mapping.description}"`;
+          if (data.combinedItems > 1) {
+            ledLine += `, CombinedItems=${data.combinedItems}, CurrentExecutor=${data.currentExecutor}, BaseExecutor=${data.baseExecutor}`;
+            if (data.mapping.isFirstInCombined) {
+              ledLine += ` (FIRST IN COMBINED)`;
+            }
+            if (data.mapping.inheritedFrom !== undefined) {
+              ledLine += ` (INHERITED FROM LED ${data.mapping.inheritedFrom})`;
+            }
+          }
+        }
       }
       
       content += ledLine + "\n";
